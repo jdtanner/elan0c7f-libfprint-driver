@@ -1,0 +1,35 @@
+--- /tmp/gnome-control-center-49.6/panels/system/users/cc-fingerprint-dialog.c	2026-03-13 12:20:44.000000000 +0000
++++ /home/the-hill-tanners/Development/libfprint/gcc_src/panels/system/users/cc-fingerprint-dialog.c	2026-03-27 21:27:35.058447292 +0000
+@@ -495,8 +495,7 @@
+ 
+   gtk_widget_set_sensitive (GTK_WIDGET (self->add_print_icon), TRUE);
+ 
+-  if (self->dialog_state & DIALOG_STATE_DEVICE_CLAIMED)
+-    gtk_widget_set_sensitive (GTK_WIDGET (self->prints_manager), TRUE);
++  gtk_widget_set_sensitive (GTK_WIDGET (self->prints_manager), TRUE);
+ 
+   if (error)
+     {
+--- /tmp/gnome-control-center-49.6/panels/system/users/cc-fingerprint-dialog.blp	2026-03-13 12:20:44.000000000 +0000
++++ /home/the-hill-tanners/Development/libfprint/gcc_src/panels/system/users/cc-fingerprint-dialog.blp	2026-03-27 21:32:41.468112419 +0000
+@@ -250,9 +250,16 @@
+ Popover add_print_popover {
+   position: bottom;
+ 
+-  Box add_print_popover_box {
+-    can-focus: false;
+-    spacing: 6;
+-    orientation: vertical;
++  ScrolledWindow {
++    hscrollbar-policy: never;
++    propagate-natural-width: true;
++    propagate-natural-height: true;
++    max-content-height: 300;
++
++    Box add_print_popover_box {
++      can-focus: false;
++      spacing: 6;
++      orientation: vertical;
++    }
+   }
+ }
