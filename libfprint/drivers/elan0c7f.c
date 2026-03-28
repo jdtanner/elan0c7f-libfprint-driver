@@ -368,7 +368,10 @@ init_run_state (FpiSsm *ssm, FpDevice *dev)
 static void
 init_done (FpiSsm *ssm, FpDevice *dev, GError *error)
 {
-  FpImageDevice *idev = FP_IMAGE_DEVICE (dev);
+  FpiDeviceElan0c7f *self = FPI_DEVICE_ELAN0C7F (dev);
+  FpImageDevice     *idev = FP_IMAGE_DEVICE (dev);
+
+  self->ssm_active = FALSE;
 
   if (error)
     {
@@ -704,6 +707,7 @@ dev_activate (FpImageDevice *dev)
   FpiSsm *ssm;
 
   self->deactivating = FALSE;
+  self->ssm_active = TRUE;
   self->finger_on = FALSE;
   self->frame_count = 0;
   self->best_quality = 0;
