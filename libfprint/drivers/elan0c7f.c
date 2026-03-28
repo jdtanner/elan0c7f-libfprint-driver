@@ -40,19 +40,15 @@
  *   Ridges run vertically; this gives NBIS enough ridge length for minutiae.
  *   Convert to 8-bit by scaling (not just shifting).
  *
- * Capture commit (not sent by this driver):
- *   write [40 ff 01]
- *   This command was observed in USB captures of the Windows driver but is
- *   not sent here.  The driver functions correctly without it — enrollment,
- *   matching, and shutdown all complete reliably in testing.
- *
- *   The 0x40 prefix matches the command family used by the elanmoc driver for
- *   nearby PIDs (0c7d, 0c7e) which perform match-on-chip (MoC).  It is
- *   plausible that the 0c7f firmware supports both image-capture mode (used
- *   here) and a MoC mode used by Windows Hello, and that [40 ff 01] is a MoC
- *   template-commit command that is irrelevant when operating in image-capture
- *   mode.  If intermittent frame capture failures are observed, sending this
- *   command after each capture would be the first thing to investigate.
+ * Match-on-chip (MoC):
+ *   This sensor does not support match-on-chip.  Analysis of the Windows
+ *   driver binaries (WbfUsbDriver.dll, EngineAdapter.dll, ELANFPService.exe)
+ *   and a live USB capture of a Windows Hello session both confirm that the
+ *   Windows driver operates in the same image-capture mode as this driver.
+ *   All fingerprint matching is performed on the host.  The elanmoc command
+ *   signatures [40 ff 01/03/13] are absent from all binaries and from the
+ *   capture.  The earlier hypothesis that [40 ff 01] might be a MoC template-
+ *   commit command is disproved.
  */
 
 #define FP_COMPONENT "elan0c7f"
