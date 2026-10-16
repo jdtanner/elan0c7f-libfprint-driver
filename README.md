@@ -15,8 +15,10 @@ branch targets 1.94.10).
 | File | Description |
 |------|-------------|
 | `libfprint/drivers/elan0c7f.c` | The driver source file |
+| `libfprint/drivers/elan0c7f-sift.cpp`, `.h` | The driver's SIFT/RANSAC matcher (needs OpenCV) |
 | `libfprint.patch` | Patch for supporting changes to libfprint core files |
 | `gnome-control-center.patch` | Patch for two GNOME Settings fingerprint dialog bugs |
+| `tools/` | Capture and offline match-accuracy tools (see below) |
 
 ---
 
@@ -24,7 +26,7 @@ branch targets 1.94.10).
 
 The 04f3:0c7f is an image-based sensor — it captures a raw 52×150 px pixel image
 over USB bulk transfer and sends it to the host. All matching is done in software
-using libfprint's NBIS/Bozorth3 pipeline. It is **not** a match-on-chip device.
+on the host. It is **not** a match-on-chip device.
 
 The sensor appears primarily in Acer Swift laptops (SF314-512, SFX14-51G,
 SF514-56T, SFX16-52G) and has been probed on over 100 Linux systems, all
@@ -36,11 +38,14 @@ previously failing.
 
 The steps below apply to a libfprint **v1.94.100** source tree.
 
-### 1. Add the driver file
+### 1. Add the driver files
 
 ```
-cp libfprint/drivers/elan0c7f.c /path/to/libfprint/libfprint/drivers/
+cp libfprint/drivers/elan0c7f.c libfprint/drivers/elan0c7f-sift.* \
+   /path/to/libfprint/libfprint/drivers/
 ```
+
+The driver needs OpenCV 4 (`opencv4` in pkg-config; `opencv-devel` on Fedora).
 
 ### 2. Apply the libfprint core patch
 
@@ -50,14 +55,19 @@ patch -p1 < /path/to/libfprint.patch
 ```
 
 This patch covers:
-- `libfprint/meson.build` and `meson.build` — register the new driver
+- `libfprint/meson.build` and `meson.build` — register the new driver and its
+  OpenCV dependency
+- `libfprint/fpi-image-device.[ch]`, `libfprint/fp-image-device.c` — optional
+  `print_from_image` / `print_merge` / `print_match` hooks that let an image
+  driver replace NBIS matching (drivers that don't set them are unaffected)
 - `libfprint/fprint-list-udev-hwdb.c` and `data/autosuspend.hwdb` — move
   04f3:0c7f from the unsupported-device list to the supported list
-- `libfprint/fp-image.c` — tune NBIS parameters for narrow sensors (< 80 px wide)
-- `libfprint/fpi-print.c` — reject scans with too few minutiae; improve debug logging
-- `libfprint/nbis/include/bozorth.h` — lower `MIN_COMPUTABLE_BOZORTH_MINUTIAE` from 10 to 5
-- `libfprint/nbis/mindtct/remove.c` — fix double-free in `remove_malformations`;
-  skip `remove_or_adjust_side_minutiae_V2` for narrow images
+- From the earlier NBIS-based matcher, no longer used by this driver's matching:
+  - `libfprint/fp-image.c` — tune NBIS parameters for narrow sensors (< 80 px wide)
+  - `libfprint/fpi-print.c` — reject scans with too few minutiae; improve debug logging
+  - `libfprint/nbis/include/bozorth.h` — lower `MIN_COMPUTABLE_BOZORTH_MINUTIAE` from 10 to 5
+  - `libfprint/nbis/mindtct/remove.c` — fix double-free in `remove_malformations`;
+    skip `remove_or_adjust_side_minutiae_V2` for narrow images
 
 ### 3. Build and install
 
@@ -75,6 +85,7 @@ into `/usr/lib64` (a later `dnf upgrade` would silently overwrite a copied file)
 ```
 sudo dnf install rpm-build rpmdevtools 'dnf-command(builddep)' 'dnf-command(versionlock)'
 sudo dnf builddep libfprint
+sudo dnf install opencv-devel
 dnf download --source libfprint && rpm -i libfprint-*.src.rpm
 
 # Combined patch (driver + core changes) from the fork branch
@@ -86,6 +97,7 @@ git -C libfprint diff v1.94.100 HEAD -- meson.build libfprint data \
 # In ~/rpmbuild/SPECS/libfprint.spec:
 #   Release:  1.1.elan0c7f%{?dist}      (replaces %autorelease)
 #   Patch0:   libfprint-elan0c7f.patch  (after Source0)
+#   BuildRequires:  opencv-devel
 rpmbuild -bb ~/rpmbuild/SPECS/libfprint.spec
 sudo dnf install ~/rpmbuild/RPMS/x86_64/libfprint-1.94.100-1.1.elan0c7f.*.x86_64.rpm
 sudo dnf versionlock add libfprint
@@ -146,32 +158,70 @@ Both bugs reported upstream: https://gitlab.gnome.org/GNOME/gnome-control-center
 - Image quality is scored per frame; the best frame is selected. Frames are
   Gaussian-blurred and 16-bit pixel values are scaled to 8-bit using the per-frame
   min/max range.
+- Matching uses SIFT keypoints instead of NBIS minutiae (see below). Prints are
+  `FPI_PRINT_RAW` holding a versioned list of keypoint samples, one per
+  enrollment scan (12 scans). Prints enrolled by earlier versions of the driver
+  (NBIS) no longer match: delete and re-enroll them.
+- Debugging: if `ELAN0C7F_DUMP_DIR` is set in fprintd's environment, every
+  enroll/verify scan is saved there as a PGM for offline analysis. These are
+  fingerprint images; use a private directory and delete them afterwards.
 
 ---
 
-## Known issue: false matches
+## Matching (work in progress)
 
-**Matching is not reliable enough for security use.** In testing on
-2026-10-16, a different finger was accepted with a score of 7, the same score
-the enrolled finger gets. The causes are:
+**Status: not yet reliable enough to recommend for login.** The new matcher
+has not accepted a wrong finger in testing, but it rejects the enrolled
+finger too often, and the cause is still being investigated.
 
-- The sensor is 52 px wide, so each sample yields only 3–11 minutiae. The
-  NBIS/Bozorth3 matcher is designed for 20–40.
-- To let the genuine finger match at all, the driver sets the Bozorth3 match
-  threshold to 4 (upstream libfprint's default is 40).
-- A scan is compared against every enrollment sample (8), and any single
-  score at or above the threshold is accepted.
+### Why not NBIS/Bozorth3
 
-Until this is resolved, treat fingerprint unlock on this sensor as a
-convenience that another person's finger may be able to pass.
+The sensor is 52 px wide, so each scan yields only 3–13 minutiae; Bozorth3 is
+designed for 20–40. Measured on 70 captures (30 of the enrolled finger, 40 from
+four other fingers), the previous driver settings (threshold 4, any of 8
+samples) accepted a wrong finger **55.8%** of the time, and at no setting could
+it reject all wrong fingers without also rejecting ~90% of genuine attempts.
+
+### SIFT + RANSAC
+
+Each scan is upscaled ×3, contrast-equalised (CLAHE) and described by SIFT
+keypoints (~50–130 per scan). Two scans score the number of descriptor matches
+that agree on a single rotation + translation (RANSAC); unrelated fingers'
+coincidental matches point in random directions and score low. A verify
+matches when any of the 12 enrollment samples scores at least 8.
+
+| | Wrong finger accepted | Enrolled finger rejected |
+|---|---|---|
+| Old NBIS settings, offline | 55.8% | 6.7% |
+| SIFT, offline (same 70 captures) | 0 of 40 scans | 17–22% |
+| SIFT, live on the sensor | 0 of 5 attempts | 5 of 11 attempts |
+
+Wrong-finger pairs never scored above 6 offline; the enrolled finger scored up
+to 79. The live rejection rate is higher than the offline estimate; with so
+few attempts it may be chance, and live scans are being captured to find out.
+
+All data so far is from one person in one session.
 
 ---
 
 ## Testing
 
 On libfprint 1.94.100 / Fedora 45:
-- `fprintd-enroll` with an existing print enrolled — succeeds
-- `fprintd-verify` — matches
+- `fprintd-enroll` from zero enrolled prints (fprintd's duplicate check runs
+  with an empty gallery) — succeeds, no crash
+- `fprintd-verify` — see the matching table above
+
+## Tools
+
+`tools/` holds the scripts used for the measurements above:
+
+- `capture.py` — save labelled scans through libfprint (`sudo`, fprintd stopped)
+- `score-matrix.c` — score every pair with libfprint's NBIS/Bozorth3
+- `sift-score.py` — the SIFT/RANSAC prototype, same output format
+- `sift-matrix.c` — score with the driver's own C++ matcher (reproduces
+  `sift-score.py` exactly on the measured captures)
+- `analyse.py` — genuine vs impostor score distributions and simulated
+  FRR/FAR for "K of N enrollment samples score ≥ T"
 
 On libfprint 1.94.10 / Fedora 43 (with IDENTIFY masked):
 - `fprintd-enroll` — enrollment succeeds end-to-end

@@ -58,6 +58,7 @@
 #define FP_COMPONENT "elan0c7f"
 
 #include "drivers_api.h"
+#include "elan0c7f-sift.h"
 
 /* -- Constants -- */
 
@@ -770,12 +771,6 @@ dev_open (FpImageDevice *dev)
       return;
     }
 
-  /* This sensor is narrow (52 px) and produces few minutiae per scan.
-   * MIN_COMPUTABLE_BOZORTH_MINUTIAE was lowered to 5 to enable scoring
-   * with the typical 5-9 minutiae this sensor produces.  With fewer
-   * minutiae the maximum achievable score is much lower than the 40+
-   * expected for full-size sensors, so we also lower the match threshold. */
-  fpi_image_device_set_bz3_threshold (dev, 4);
   fpi_image_device_open_complete (dev, NULL);
 }
 
@@ -865,6 +860,257 @@ dev_change_state (FpImageDevice *dev, FpiImageDeviceState state)
     }
 }
 
+/* -- Matching --
+ *
+ * NBIS/Bozorth3 cannot tell fingers apart on this sensor: each 52 px wide
+ * image yields only 3-13 minutiae, and measured on 70 captures a wrong
+ * finger was accepted 56% of the time at the old settings.  Instead each
+ * scan is described by SIFT keypoints and scored by how many keypoint
+ * matches agree on one rotation + translation (elan0c7f-sift.cpp).
+ *
+ * Prints are FPI_PRINT_RAW with fpi-data PRINT_FORMAT: a format version and
+ * one (positions, descriptors) sample per enrollment scan.  A probe holds a
+ * single sample, and matches a template when any sample scores at least
+ * MATCH_THRESHOLD.  In the measurements no wrong-finger pair scored above
+ * 6, so 8 leaves some margin; with 12 samples the enrolled finger was then
+ * rejected on ~18% of attempts. */
+
+#define PRINT_FORMAT "(ua(aday))"
+#define PRINT_FORMAT_VERSION 1
+#define MATCH_THRESHOLD 8
+#define MIN_KEYPOINTS 20
+
+static GVariant *
+sample_new (const Elan0c7fFeatures *f)
+{
+  return g_variant_new ("(@ad@ay)",
+                        g_variant_new_fixed_array (G_VARIANT_TYPE_DOUBLE,
+                                                   f->xy, 2 * f->n,
+                                                   sizeof (gdouble)),
+                        g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE,
+                                                   f->desc,
+                                                   f->n * ELAN0C7F_SIFT_DESC_LEN,
+                                                   sizeof (guint8)));
+}
+
+static gboolean
+sample_parse (GVariant *sample, Elan0c7fFeatures *f)
+{
+  g_autoptr(GVariant) xy_v = g_variant_get_child_value (sample, 0);
+  g_autoptr(GVariant) desc_v = g_variant_get_child_value (sample, 1);
+  const gdouble *xy;
+  const guint8 *desc;
+  gsize n_xy, n_desc;
+
+  xy = g_variant_get_fixed_array (xy_v, &n_xy, sizeof (gdouble));
+  desc = g_variant_get_fixed_array (desc_v, &n_desc, sizeof (guint8));
+  if (n_xy % 2 != 0 || n_desc != n_xy / 2 * ELAN0C7F_SIFT_DESC_LEN)
+    return FALSE;
+
+  f->n = n_xy / 2;
+  f->xy = g_memdup2 (xy, n_xy * sizeof (gdouble));
+  f->desc = g_memdup2 (desc, n_desc);
+  return TRUE;
+}
+
+/* The print's samples array, or NULL if it is not in this driver's format
+ * (e.g. an NBIS print enrolled by an older version of the driver). */
+static GVariant *
+print_samples (FpPrint *print)
+{
+  g_autoptr(GVariant) data = NULL;
+  GVariant *samples;
+  guint32 version;
+
+  if (fpi_print_get_type (print) != FPI_PRINT_RAW)
+    return NULL;
+
+  g_object_get (print, "fpi-data", &data, NULL);
+  if (!data || !g_variant_is_of_type (data, G_VARIANT_TYPE (PRINT_FORMAT)))
+    return NULL;
+
+  g_variant_get (data, "(u@a(aday))", &version, &samples);
+  if (version != PRINT_FORMAT_VERSION)
+    {
+      g_variant_unref (samples);
+      return NULL;
+    }
+  return samples;
+}
+
+static void
+set_samples (FpPrint *print, GVariantBuilder *samples)
+{
+  g_object_set (print, "fpi-data",
+                g_variant_new ("(u@a(aday))", PRINT_FORMAT_VERSION,
+                               g_variant_builder_end (samples)),
+                NULL);
+}
+
+/* Debugging aid, off unless ELAN0C7F_DUMP_DIR is set: save each scan that
+ * is matched or enrolled, as an 8-bit PGM with dark ridges (the format of
+ * the capture tool in the elan0c7f-libfprint-driver repository), so live
+ * sessions can be replayed offline.  These are fingerprint images: point
+ * it at a private directory and delete them after use. */
+static void
+dump_scan (FpDevice *dev, const guint8 *pixels, gint width, gint height)
+{
+  const char *dir = g_getenv ("ELAN0C7F_DUMP_DIR");
+  FpiDeviceAction current = fpi_device_get_current_action (dev);
+  const char *action = "other";
+  g_autofree char *name = NULL;
+  g_autofree char *path = NULL;
+
+  g_autoptr(GString) pgm = NULL;
+  g_autoptr(GError) error = NULL;
+
+  if (!dir || !*dir)
+    return;
+
+  if (current == FPI_DEVICE_ACTION_ENROLL)
+    action = "enroll";
+  else if (current == FPI_DEVICE_ACTION_IDENTIFY)
+    action = "identify";
+
+  name = g_strdup_printf ("%" G_GINT64_FORMAT "-%s.pgm",
+                          g_get_real_time (), action);
+  path = g_build_filename (dir, name, NULL);
+  pgm = g_string_new (NULL);
+  g_string_printf (pgm, "P5\n%d %d\n255\n", width, height);
+  g_string_append_len (pgm, (const char *) pixels, (gssize) width * height);
+  if (!g_file_set_contents_full (path, pgm->str, pgm->len,
+                                 G_FILE_SET_CONTENTS_CONSISTENT, 0600, &error))
+    g_warning ("Could not save scan to %s: %s", path, error->message);
+  else
+    fp_dbg ("saved scan to %s", path);
+}
+
+static gboolean
+dev_print_from_image (FpImageDevice *dev, FpImage *image, FpPrint *print,
+                      GError **error)
+{
+  gsize npix = (gsize) image->width * image->height;
+  g_autofree guint8 *pixels = g_memdup2 (image->data, npix);
+  Elan0c7fFeatures f = { 0 };
+  GVariantBuilder samples;
+
+  /* Minutiae detection normally leaves dark ridges with the flag cleared,
+   * but not when it failed, so normalise here. */
+  if (image->flags & FPI_IMAGE_COLORS_INVERTED)
+    for (gsize i = 0; i < npix; i++)
+      pixels[i] = 255 - pixels[i];
+
+  dump_scan (FP_DEVICE (dev), pixels, image->width, image->height);
+
+  elan0c7f_sift_extract (pixels, image->width, image->height, &f);
+  fp_dbg ("sift: %u keypoints", f.n);
+  if (f.n < MIN_KEYPOINTS)
+    {
+      elan0c7f_features_clear (&f);
+      g_set_error_literal (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_CENTER_FINGER,
+                           "Too little fingerprint detail, center your finger on the sensor");
+      return FALSE;
+    }
+
+  g_variant_builder_init (&samples, G_VARIANT_TYPE ("a(aday)"));
+  g_variant_builder_add_value (&samples, sample_new (&f));
+  elan0c7f_features_clear (&f);
+
+  fpi_print_set_type (print, FPI_PRINT_RAW);
+  set_samples (print, &samples);
+  return TRUE;
+}
+
+static void
+dev_print_merge (FpImageDevice *dev, FpPrint *enroll_print, FpPrint *print)
+{
+  g_autoptr(GVariant) old = print_samples (enroll_print);
+  g_autoptr(GVariant) add = print_samples (print);
+  GVariantBuilder samples;
+  GVariantIter iter;
+  GVariant *sample;
+
+  g_return_if_fail (add != NULL);
+
+  g_variant_builder_init (&samples, G_VARIANT_TYPE ("a(aday)"));
+  if (old)
+    {
+      g_variant_iter_init (&iter, old);
+      while ((sample = g_variant_iter_next_value (&iter)))
+        {
+          g_variant_builder_add_value (&samples, sample);
+          g_variant_unref (sample);
+        }
+    }
+  g_variant_iter_init (&iter, add);
+  while ((sample = g_variant_iter_next_value (&iter)))
+    {
+      g_variant_builder_add_value (&samples, sample);
+      g_variant_unref (sample);
+    }
+  set_samples (enroll_print, &samples);
+}
+
+static FpiMatchResult
+dev_print_match (FpImageDevice *dev, FpPrint *print_template, FpPrint *print,
+                 GError **error)
+{
+  g_autoptr(GVariant) templates = print_samples (print_template);
+  g_autoptr(GVariant) probes = print_samples (print);
+  g_autoptr(GVariant) probe_v = NULL;
+  Elan0c7fFeatures probe = { 0 };
+  FpiMatchResult result = FPI_MATCH_FAIL;
+  gsize n;
+
+  if (!probes || g_variant_n_children (probes) != 1)
+    {
+      g_set_error_literal (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_GENERAL,
+                           "Invalid probe print");
+      return FPI_MATCH_ERROR;
+    }
+
+  /* Not an error: that would also abort fprintd's duplicate check, and so
+   * block re-enrolling while an old print is still stored. */
+  if (!templates)
+    {
+      g_warning ("Stored fingerprint was enrolled with an older version of "
+                 "the elan0c7f driver and cannot match; delete and re-enroll it");
+      return FPI_MATCH_FAIL;
+    }
+
+  probe_v = g_variant_get_child_value (probes, 0);
+  if (!sample_parse (probe_v, &probe))
+    {
+      g_set_error_literal (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_GENERAL,
+                           "Invalid probe print");
+      return FPI_MATCH_ERROR;
+    }
+
+  n = g_variant_n_children (templates);
+  for (gsize i = 0; i < n && result != FPI_MATCH_SUCCESS; i++)
+    {
+      g_autoptr(GVariant) sample_v = g_variant_get_child_value (templates, i);
+      Elan0c7fFeatures sample = { 0 };
+      gint score;
+
+      if (!sample_parse (sample_v, &sample))
+        {
+          g_warning ("Skipping corrupt sample %" G_GSIZE_FORMAT " of stored fingerprint", i);
+          continue;
+        }
+
+      score = elan0c7f_sift_score (&probe, &sample);
+      fp_dbg ("sift score %d/%d (sample %" G_GSIZE_FORMAT "/%" G_GSIZE_FORMAT ")",
+              score, MATCH_THRESHOLD, i + 1, n);
+      if (score >= MATCH_THRESHOLD)
+        result = FPI_MATCH_SUCCESS;
+      elan0c7f_features_clear (&sample);
+    }
+
+  elan0c7f_features_clear (&probe);
+  return result;
+}
+
 /* -- Driver registration -- */
 
 static const FpIdEntry id_table[] = {
@@ -889,11 +1135,11 @@ fpi_device_elan0c7f_class_init (FpiDeviceElan0c7fClass *klass)
   dev_class->id_table  = id_table;
   dev_class->scan_type = FP_SCAN_TYPE_PRESS;
 
-  /* More enroll stages give the matcher more templates to work with,
-   * compensating for the low minutiae count on this narrow sensor.
-   * Some stages are rejected (too few minutiae) and retried, so we need
-   * more than the default 5 to end up with enough usable templates. */
-  dev_class->nr_enroll_stages = 8;
+  /* Each scan covers only part of the finger, so more samples mean a
+   * later scan is more likely to overlap one of them.  In the offline
+   * measurements, 12 rather than 8 cut genuine rejections from ~22% to
+   * ~18% at MATCH_THRESHOLD; 16 gained little more. */
+  dev_class->nr_enroll_stages = 12;
 
   /* IDENTIFY must stay enabled: since 1.94.100 image devices implement
    * verify via identify with a single-print gallery, so masking it out
@@ -908,4 +1154,8 @@ fpi_device_elan0c7f_class_init (FpiDeviceElan0c7fClass *klass)
   img_class->activate     = dev_activate;
   img_class->deactivate   = dev_deactivate;
   img_class->change_state = dev_change_state;
+
+  img_class->print_from_image = dev_print_from_image;
+  img_class->print_merge      = dev_print_merge;
+  img_class->print_match      = dev_print_match;
 }
