@@ -1,7 +1,7 @@
 /*
  * ELAN 04f3:0c7f Fingerprint Sensor driver for libfprint
  *
- * Copyright (C) 2026 John Hill-Maybury
+ * Copyright (C) 2026 John Hill-Tanner
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
