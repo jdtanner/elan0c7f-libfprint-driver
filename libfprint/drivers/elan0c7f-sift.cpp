@@ -27,6 +27,7 @@
  */
 
 #include "elan0c7f-sift.h"
+#include "elan0c7f-gain.h"
 
 #include <cmath>
 #include <cstring>
@@ -43,6 +44,24 @@ const float RATIO = 0.8f;       /* Lowe's ratio test */
 const double RANSAC_PX = 3.0 * UPSCALE;
 const double MIN_SCALE = 0.8;   /* Same sensor, so scale stays near 1 */
 const double MAX_SCALE = 1.25;
+
+/* Divide out the power-icon pattern (elan0c7f-gain.h) and rescale to the
+ * full 8-bit range.  Other image sizes are passed through unchanged. */
+cv::Mat
+flatten (const cv::Mat &img)
+{
+  cv::Mat gain, f, out;
+
+  if (img.cols != ELAN0C7F_GAIN_WIDTH || img.rows != ELAN0C7F_GAIN_HEIGHT)
+    return img;
+
+  cv::Mat (ELAN0C7F_GAIN_HEIGHT, ELAN0C7F_GAIN_WIDTH, CV_8U,
+           const_cast<unsigned char *> (elan0c7f_gain_map))
+  .convertTo (gain, CV_32F, 1.0 / 255, 0.5);
+  img.convertTo (f, CV_32F);
+  cv::normalize (f / gain, out, 0, 255, cv::NORM_MINMAX, CV_8U);
+  return out;
+}
 
 cv::Mat
 descriptors_of (const Elan0c7fFeatures *f)
@@ -64,7 +83,7 @@ elan0c7f_sift_extract (const guint8 *pixels, gint width, gint height,
   cv::Mat big, eq, desc;
   std::vector<cv::KeyPoint> kps;
 
-  cv::resize (img, big, cv::Size (), UPSCALE, UPSCALE, cv::INTER_CUBIC);
+  cv::resize (flatten (img), big, cv::Size (), UPSCALE, UPSCALE, cv::INTER_CUBIC);
   cv::createCLAHE (2.0, cv::Size (4, 4))->apply (big, eq);
   cv::SIFT::create ()->detectAndCompute (eq, cv::noArray (), kps, desc);
 

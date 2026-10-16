@@ -44,7 +44,9 @@ def main():
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     data_dir, label, count = sys.argv[1], sys.argv[2], int(sys.argv[3])
     out_dir = os.path.join(data_dir, label)
-    os.makedirs(out_dir, exist_ok=True)
+    # Fingerprint images: keep the data private, and owned by the sudo user.
+    os.makedirs(out_dir, mode=0o700, exist_ok=True)
+    give_to_invoking_user(data_dir, out_dir)
     start = len([f for f in os.listdir(out_dir) if f.endswith(".pgm")])
 
     ctx = FPrint.Context()
@@ -73,7 +75,7 @@ def main():
             with open(path, "wb") as f:
                 f.write(b"P5\n%d %d\n255\n" % (w, h))
                 f.write(bytes(img.get_data()))
-            give_to_invoking_user(out_dir, path)
+            give_to_invoking_user(path)
             print(f" saved {path}")
     finally:
         dev.close_sync()

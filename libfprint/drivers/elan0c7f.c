@@ -866,17 +866,18 @@ dev_change_state (FpImageDevice *dev, FpiImageDeviceState state)
  * image yields only 3-13 minutiae, and measured on 70 captures a wrong
  * finger was accepted 56% of the time at the old settings.  Instead each
  * scan is described by SIFT keypoints and scored by how many keypoint
- * matches agree on one rotation + translation (elan0c7f-sift.cpp).
+ * matches agree on one rotation + translation (elan0c7f-sift.cpp), after
+ * dividing out the power-key icon that appears in every scan
+ * (elan0c7f-gain.h).
  *
  * Prints are FPI_PRINT_RAW with fpi-data PRINT_FORMAT: a format version and
  * one (positions, descriptors) sample per enrollment scan.  A probe holds a
  * single sample, and matches a template when any sample scores at least
- * MATCH_THRESHOLD.  In the measurements no wrong-finger pair scored above
- * 6, so 8 leaves some margin; with 12 samples the enrolled finger was then
- * rejected on ~18% of attempts. */
+ * MATCH_THRESHOLD.  Version 1 prints were made without the icon correction
+ * and are not comparable, so they must be re-enrolled. */
 
 #define PRINT_FORMAT "(ua(aday))"
-#define PRINT_FORMAT_VERSION 1
+#define PRINT_FORMAT_VERSION 2
 #define MATCH_THRESHOLD 8
 #define MIN_KEYPOINTS 20
 

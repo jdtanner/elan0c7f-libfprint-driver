@@ -16,6 +16,7 @@ branch targets 1.94.10).
 |------|-------------|
 | `libfprint/drivers/elan0c7f.c` | The driver source file |
 | `libfprint/drivers/elan0c7f-sift.cpp`, `.h` | The driver's SIFT/RANSAC matcher (needs OpenCV) |
+| `libfprint/drivers/elan0c7f-gain.h` | Built-in map of the power-key icon, divided out of every scan |
 | `libfprint.patch` | Patch for supporting changes to libfprint core files |
 | `gnome-control-center.patch` | Patch for two GNOME Settings fingerprint dialog bugs |
 | `tools/` | Capture and offline match-accuracy tools (see below) |
@@ -42,7 +43,7 @@ The steps below apply to a libfprint **v1.94.100** source tree.
 
 ```
 cp libfprint/drivers/elan0c7f.c libfprint/drivers/elan0c7f-sift.* \
-   /path/to/libfprint/libfprint/drivers/
+   libfprint/drivers/elan0c7f-gain.h /path/to/libfprint/libfprint/drivers/
 ```
 
 The driver needs OpenCV 4 (`opencv4` in pkg-config; `opencv-devel` on Fedora).
@@ -163,16 +164,23 @@ Both bugs reported upstream: https://gitlab.gnome.org/GNOME/gnome-control-center
   enrollment scan (12 scans). Prints enrolled by earlier versions of the driver
   (NBIS) no longer match: delete and re-enroll them.
 - Debugging: if `ELAN0C7F_DUMP_DIR` is set in fprintd's environment, every
-  enroll/verify scan is saved there as a PGM for offline analysis. These are
-  fingerprint images; use a private directory and delete them afterwards.
+  enroll/verify scan is saved there as a PGM for offline analysis. fprintd's
+  systemd sandbox and SELinux policy only let it write under `/var/lib/fprint`,
+  so use e.g. `/var/lib/fprint/elan0c7f-dump` (create it with mode 0700 and run
+  `restorecon` on it). These are fingerprint images; delete them afterwards.
+- **Enroll with natural placement.** Place the finger exactly as you will to
+  unlock, every time. The sensor is only ~2.6 mm wide, and deliberately moving
+  the finger between enrollment touches gives samples that later verifies
+  don't overlap.
 
 ---
 
-## Matching (work in progress)
+## Matching
 
-**Status: not yet reliable enough to recommend for login.** The new matcher
-has not accepted a wrong finger in testing, but it rejects the enrolled
-finger too often, and the cause is still being investigated.
+**Status: promising, not yet confirmed.** In the latest live test the enrolled
+finger matched 8 times in 10 and no wrong finger was accepted (0 of 10). All
+data so far is from one person on one evening; a second session on another day
+is still to come before recommending it for login.
 
 ### Why not NBIS/Bozorth3
 
@@ -190,17 +198,30 @@ that agree on a single rotation + translation (RANSAC); unrelated fingers'
 coincidental matches point in random directions and score low. A verify
 matches when any of the 12 enrollment samples scores at least 8.
 
-| | Wrong finger accepted | Enrolled finger rejected |
+### The power-key icon
+
+The sensor sits under the power key, which is printed with the power symbol
+(⏻). The icon appears in every scan whatever the finger — the average images
+of different fingers correlate 0.82–0.94 — so it makes all fingers look alike.
+Before extracting features the driver divides each scan by a fixed map of the
+icon (`elan0c7f-gain.h`: the blurred average of 40 scans of four fingers that
+were never enrolled). The map comes from one unit; other units of the same
+model carry the same icon, but its exact position may differ slightly.
+
+### Results
+
+| | Wrong finger accepted | Enrolled finger matched |
 |---|---|---|
-| Old NBIS settings, offline | 55.8% | 6.7% |
-| SIFT, offline (same 70 captures) | 0 of 40 scans | 17–22% |
-| SIFT, live on the sensor | 0 of 5 attempts | 5 of 11 attempts |
+| Old NBIS settings (offline, 70 captures) | 55.8% | 93% |
+| SIFT, no icon correction (live, natural enrollment) | 0 of 5 | 6 of 11 |
+| SIFT + icon correction (live, natural enrollment) | **0 of 10** | **8 of 10** |
 
-Wrong-finger pairs never scored above 6 offline; the enrolled finger scored up
-to 79. The live rejection rate is higher than the offline estimate; with so
-few attempts it may be chance, and live scans are being captured to find out.
-
-All data so far is from one person in one session.
+Replaying saved live scans through the driver's matcher reproduces the live
+scores exactly. With the icon correction, an enrollment made with deliberately
+shifted placements went from 0 of 11 to 7 of 11 verifies matched. In a
+cross-check where the icon map was built from two fingers and wrong-finger
+attempts were taken from the other two, none of 60 was accepted (highest score
+3–4 against the threshold of 8).
 
 ---
 

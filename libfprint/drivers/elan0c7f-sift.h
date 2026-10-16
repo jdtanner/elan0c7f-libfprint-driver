@@ -35,8 +35,9 @@ typedef struct
   guint8  *desc;
 } Elan0c7fFeatures;
 
-/* Extract features from an 8-bit image with dark ridges.  Fills @out, which
- * must be released with elan0c7f_features_clear(). */
+/* Extract features from an 8-bit image with dark ridges, after dividing out
+ * the sensor's fixed power-icon pattern (for 52 x 150 images).  Fills @out,
+ * which must be released with elan0c7f_features_clear(). */
 void elan0c7f_sift_extract (const guint8     *pixels,
                             gint              width,
                             gint              height,
