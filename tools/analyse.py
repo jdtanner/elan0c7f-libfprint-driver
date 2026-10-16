@@ -5,7 +5,7 @@ finger from other fingers on this sensor?
 
 Usage:
   score-matrix DATA_DIR/*/*.pgm > scores.txt
-  python3 analyse.py scores.txt ENROLLED_LABEL [ENROLL_SAMPLES]
+  python3 analyse.py [--thresholds=T1,T2,...] scores.txt ENROLLED_LABEL [ENROLL_SAMPLES]
 
 The image's parent directory name is its label (as written by capture.py).
 ENROLLED_LABEL is the finger treated as enrolled, e.g. right-index; every
@@ -15,7 +15,8 @@ nr_enroll_stages) is the size of each simulated enrollment.
 Reports per-image minutiae counts, genuine vs impostor pair scores, and a
 simulation of fprintd's decision rule: a probe matches when at least K of
 the enrollment samples score >= T.  FRR = genuine probes rejected,
-FAR = impostor probes accepted.
+FAR = impostor probes accepted.  The default thresholds suit Bozorth3
+scores; pass --thresholds for other matchers (e.g. sift-score.py).
 
 Copyright (C) 2026 John Hill-Tanner
 SPDX-License-Identifier: LGPL-2.1-or-later
@@ -27,7 +28,7 @@ import random
 import sys
 
 TRIALS = 300
-THRESHOLDS = [4, 5, 6, 8, 10, 12, 15, 20, 25, 30, 40]
+DEFAULT_THRESHOLDS = [4, 5, 6, 8, 10, 12, 15, 20, 25, 30, 40]
 KS = [1, 2, 3]
 
 
@@ -60,11 +61,15 @@ def summary(name, xs):
 
 
 def main():
-    if len(sys.argv) not in (3, 4):
+    args = sys.argv[1:]
+    thresholds = DEFAULT_THRESHOLDS
+    if args and args[0].startswith("--thresholds="):
+        thresholds = [int(t) for t in args.pop(0).split("=", 1)[1].split(",")]
+    if len(args) not in (2, 3):
         sys.exit(__doc__)
-    labels, nrows, scores = load(sys.argv[1])
-    enrolled = sys.argv[2]
-    n_enroll = int(sys.argv[3]) if len(sys.argv) == 4 else 8
+    labels, nrows, scores = load(args[0])
+    enrolled = args[1]
+    n_enroll = int(args[2]) if len(args) == 3 else 8
 
     by_label = collections.defaultdict(list)
     for i, lab in labels.items():
@@ -94,41 +99,42 @@ def main():
         sys.exit(f"\nneed at least {n_enroll + 1} usable {enrolled} images "
                  f"to simulate enrollment, have {len(usable)}")
 
+    # For each attempt keep the K-th best score against the enrollment:
+    # "at least K samples score >= T" is then simply kth >= T.
     rng = random.Random(0)
-    frr = collections.Counter()
-    far = collections.Counter()
-    n_gen = n_imp = 0
+    kth = {"g": {k: [] for k in KS}, "i": {k: [] for k in KS}}
     for _ in range(TRIALS):
         enroll = rng.sample(usable, n_enroll)
         rest = [i for i in usable if i not in enroll]
         for probe, bucket in ([(p, "g") for p in rest] +
                               [(p, "i") for p in impostors]):
-            ss = [scores.get((probe, e), 0) for e in enroll]
-            if bucket == "g":
-                n_gen += 1
-            else:
-                n_imp += 1
-            for t in THRESHOLDS:
-                for k in KS:
-                    hit = sum(1 for s in ss if s >= t) >= k
-                    if bucket == "g" and not hit:
-                        frr[(t, k)] += 1
-                    if bucket == "i" and hit:
-                        far[(t, k)] += 1
+            ss = sorted((scores.get((probe, e), 0) for e in enroll),
+                        reverse=True)
+            for k in KS:
+                kth[bucket][k].append(ss[k - 1])
+    n_gen, n_imp = len(kth["g"][1]), len(kth["i"][1])
+
+    def frr(t, k):
+        return 100 * sum(1 for x in kth["g"][k] if x < t) / n_gen
+
+    def far(t, k):
+        return 100 * sum(1 for x in kth["i"][k] if x >= t) / max(n_imp, 1)
 
     print(f"\nSimulated decisions: enrolled={enrolled}, {n_enroll} samples per "
           f"enrollment, {TRIALS} random enrollments")
     print(f"  ({n_gen} genuine and {n_imp} impostor probe attempts in total)")
     print("  T = score threshold, K = samples that must reach it")
-    print("  current driver: T=4, K=1\n")
+    print("  current driver: T=4, K=1 (Bozorth3)\n")
     print("   T  " + "".join(f"   K={k}: FRR    FAR " for k in KS))
-    for t in THRESHOLDS:
-        row = f"  {t:2d}  "
-        for k in KS:
-            row += (f"      {100 * frr[(t, k)] / n_gen:5.1f}% "
-                    f"{100 * far[(t, k)] / max(n_imp, 1):5.1f}%")
-        print(row)
+    for t in thresholds:
+        print(f"  {t:2d}  " + "".join(
+            f"      {frr(t, k):5.1f}% {far(t, k):5.1f}%" for k in KS))
 
+    print("\nLowest FRR with no impostor attempt accepted:")
+    for k in KS:
+        t = max(kth["i"][k]) + 1
+        print(f"  K={k}: T={t:3d}  FRR={frr(t, k):5.1f}%  "
+              f"(impostor kth-best score max={t - 1})")
 
 if __name__ == "__main__":
     main()
