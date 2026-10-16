@@ -30,8 +30,11 @@
  *   write [00 0b]
  *   write [9a 10] -> read EP83 (discard)
  *   write [40 31]
- *   write [40 3f] -> read EP83 -> 0x55 = finger detected
- *   If 0xca, retry once after 200ms.
+ *   write [40 3f]
+ *   The Windows driver then blocks on EP83 until 0x55 (finger detected;
+ *   0xca = retry).  This driver does not read that response; it detects
+ *   the finger by polling frames and scoring their quality instead, and
+ *   the INIT_FLUSH reads drain the stale EP83 byte on the next re-arm.
  *
  * Frame capture:
  *   write [00 09] -> read EP82 -> 15600 bytes
@@ -382,6 +385,8 @@ init_done (FpiSsm *ssm, FpDevice *dev, GError *error)
 
   if (error)
     {
+      /* libfprint does not call deactivate after a failed activation. */
+      g_clear_pointer (&self->frame_buf, g_free);
       fpi_image_device_activate_complete (idev, error);
       return;
     }
@@ -400,6 +405,8 @@ reinit_done (FpiSsm *ssm, FpDevice *dev, GError *error)
 
   if (self->deactivating)
     {
+      /* The SSM hands us ownership of error; it is moot once deactivating. */
+      g_clear_error (&error);
       g_clear_pointer (&self->frame_buf, g_free);
       g_clear_object (&self->best_img);
       fpi_image_device_deactivate_complete (idev, NULL);
@@ -638,6 +645,8 @@ capture_done (FpiSsm *ssm, FpDevice *dev, GError *error)
 
   if (self->deactivating)
     {
+      /* The SSM hands us ownership of error; it is moot once deactivating. */
+      g_clear_error (&error);
       g_clear_pointer (&self->frame_buf, g_free);
       g_clear_object (&self->best_img);
       fpi_image_device_deactivate_complete (idev, NULL);
@@ -807,13 +816,11 @@ fpi_device_elan0c7f_class_init (FpiDeviceElan0c7fClass *klass)
    * more than the default 5 to end up with enough usable templates. */
   dev_class->nr_enroll_stages = 8;
 
-  /* Disable IDENTIFY: fprintd crashes (SEGV at 0x7b6, null-pointer call)
-   * when it calls fp_device_identify() with an empty gallery during the
-   * first-ever enrollment (no prints stored yet).  Without IDENTIFY,
-   * fprintd skips duplicate detection and calls enroll directly, which
-   * is the correct behaviour.  Authentication still works because fprintd
-   * falls back to verify when the feature is absent. */
-  dev_class->features &= ~FP_DEVICE_FEATURE_IDENTIFY;
+  /* IDENTIFY must stay enabled: since 1.94.100 image devices implement
+   * verify via identify with a single-print gallery, so masking it out
+   * makes every verify fail with FP_DEVICE_ERROR_NOT_SUPPORTED.  (On
+   * 1.94.10 it was masked to avoid an fprintd crash on identify with an
+   * empty gallery during first enrollment.) */
 
   img_class->img_width    = IMG_WIDTH;
   img_class->img_height   = IMG_HEIGHT;

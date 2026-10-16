@@ -1,7 +1,12 @@
 # ELAN 04f3:0c7f Fingerprint Reader — libfprint Driver
 
 libfprint driver for the **ELAN Microelectronics 04f3:0c7f** fingerprint sensor,
-found in Acer Swift laptops. Tested on Fedora 43, Wayland, with fprintd 1.94.5.
+found in Acer Swift laptops. Targets **libfprint 1.94.100**; tested on Fedora 45
+(Wayland) with fprintd 1.94.5.
+
+A full libfprint fork with these changes applied is on the `elan-0c7f-1.94.100`
+branch of https://github.com/jdtanner/libfprint (the older `elan-0c7f-driver`
+branch targets 1.94.10).
 
 ---
 
@@ -29,6 +34,8 @@ previously failing.
 
 ## Applying the driver
 
+The steps below apply to a libfprint **v1.94.100** source tree.
+
 ### 1. Add the driver file
 
 ```
@@ -44,6 +51,8 @@ patch -p1 < /path/to/libfprint.patch
 
 This patch covers:
 - `libfprint/meson.build` and `meson.build` — register the new driver
+- `libfprint/fprint-list-udev-hwdb.c` and `data/autosuspend.hwdb` — move
+  04f3:0c7f from the unsupported-device list to the supported list
 - `libfprint/fp-image.c` — tune NBIS parameters for narrow sensors (< 80 px wide)
 - `libfprint/fpi-print.c` — reject scans with too few minutiae; improve debug logging
 - `libfprint/nbis/include/bozorth.h` — lower `MIN_COMPUTABLE_BOZORTH_MINUTIAE` from 10 to 5
@@ -52,11 +61,39 @@ This patch covers:
 
 ### 3. Build and install
 
+To build and test:
+
 ```
 meson setup builddir
 ninja -C builddir
-sudo cp builddir/libfprint/libfprint-2.so.2.0.0 /usr/lib64/libfprint-2.so.2.0.0
+meson test -C builddir
 ```
+
+On Fedora, prefer rebuilding the distribution package over copying the library
+into `/usr/lib64` (a later `dnf upgrade` would silently overwrite a copied file):
+
+```
+sudo dnf install rpm-build rpmdevtools 'dnf-command(builddep)' 'dnf-command(versionlock)'
+sudo dnf builddep libfprint
+dnf download --source libfprint && rpm -i libfprint-*.src.rpm
+
+# Combined patch (driver + core changes) from the fork branch
+git clone -b elan-0c7f-1.94.100 https://github.com/jdtanner/libfprint.git
+git -C libfprint fetch https://gitlab.freedesktop.org/libfprint/libfprint.git tag v1.94.100
+git -C libfprint diff v1.94.100 HEAD -- meson.build libfprint data \
+    > ~/rpmbuild/SOURCES/libfprint-elan0c7f.patch
+
+# In ~/rpmbuild/SPECS/libfprint.spec:
+#   Release:  1.1.elan0c7f%{?dist}      (replaces %autorelease)
+#   Patch0:   libfprint-elan0c7f.patch  (after Source0)
+rpmbuild -bb ~/rpmbuild/SPECS/libfprint.spec
+sudo dnf install ~/rpmbuild/RPMS/x86_64/libfprint-1.94.100-1.1.elan0c7f.*.x86_64.rpm
+sudo dnf versionlock add libfprint
+```
+
+On 1.94.100, upstream's `egis_etu905` test fails when the whole suite runs in
+parallel, and passes when run alone. Unmodified 1.94.100 fails the same way, so
+the failure is not caused by this driver.
 
 ---
 
@@ -86,14 +123,22 @@ The popup's natural height (~410 px) exceeds the dialog's `content-height: 400`.
 On Wayland an `xdg_popup` cannot exceed its parent surface bounds — the compositor
 immediately dismisses it, so clicking "Scan new fingerprint" appeared to do nothing.
 
+This patch was written against 49.6 and has not been re-checked against later
+releases (Fedora 45 ships 51.1).
+
 Both bugs reported upstream: https://gitlab.gnome.org/GNOME/gnome-control-center/-/issues/3208
 
 ---
 
 ## Driver design notes
 
-- `FP_DEVICE_FEATURE_IDENTIFY` is disabled — the firmware does not support 1:N
-  identification. Leaving it enabled caused fprintd to crash during first enrollment.
+- `FP_DEVICE_FEATURE_IDENTIFY` stays enabled. Since 1.94.100, libfprint
+  implements verify for image devices via identify with a single-print gallery,
+  so masking the feature makes every verify fail with "Device has not
+  identification support". (On 1.94.10 it was masked to work around an fprintd
+  crash on identify with an empty gallery during first enrollment.)
+- Finger presence is detected by polling frames and scoring their quality, not
+  from the sensor's `[40 3f]` → `0x55` finger-detect response.
 - A `deactivating` flag defers cleanup of `frame_buf` and `best_img` until after
   all in-flight USB transfers complete, avoiding a use-after-free when
   `dev_deactivate` is called while the capture SSM is still running.
@@ -105,6 +150,11 @@ Both bugs reported upstream: https://gitlab.gnome.org/GNOME/gnome-control-center
 
 ## Testing
 
+On libfprint 1.94.100 / Fedora 45:
+- `fprintd-enroll` with an existing print enrolled — succeeds
+- `fprintd-verify` — matches
+
+On libfprint 1.94.10 / Fedora 43 (with IDENTIFY masked):
 - `fprintd-enroll` — enrollment succeeds end-to-end
 - GNOME Settings → Users → fingerprint enrollment — works from a clean state
   (0 enrolled prints) and with existing prints
