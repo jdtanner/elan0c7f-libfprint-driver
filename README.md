@@ -20,6 +20,7 @@ branch targets 1.94.10).
 | `libfprint.patch` | Patch for supporting changes to libfprint core files |
 | `gnome-control-center.patch` | Patch for two GNOME Settings fingerprint dialog bugs |
 | `tools/` | Capture and offline match-accuracy tools (see below) |
+| `matching-investigation.md` | Write-up of the 1.94.100 port and the matching investigation |
 
 ---
 
