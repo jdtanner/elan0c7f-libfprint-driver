@@ -137,14 +137,33 @@ Both bugs reported upstream: https://gitlab.gnome.org/GNOME/gnome-control-center
   so masking the feature makes every verify fail with "Device has not
   identification support". (On 1.94.10 it was masked to work around an fprintd
   crash on identify with an empty gallery during first enrollment.)
-- Finger presence is detected by polling frames and scoring their quality, not
-  from the sensor's `[40 3f]` → `0x55` finger-detect response.
+- While idle the driver waits on the sensor's own finger detect (`[40 31]`
+  `[40 3f]`, then a read on EP83 that completes with `0x55` on touch) instead
+  of polling frames, so no USB traffic flows until a finger is placed.
 - A `deactivating` flag defers cleanup of `frame_buf` and `best_img` until after
   all in-flight USB transfers complete, avoiding a use-after-free when
   `dev_deactivate` is called while the capture SSM is still running.
 - Image quality is scored per frame; the best frame is selected. Frames are
   Gaussian-blurred and 16-bit pixel values are scaled to 8-bit using the per-frame
   min/max range.
+
+---
+
+## Known issue: false matches
+
+**Matching is not reliable enough for security use.** In testing on
+2026-10-16, a different finger was accepted with a score of 7, the same score
+the enrolled finger gets. The causes are:
+
+- The sensor is 52 px wide, so each sample yields only 3–11 minutiae. The
+  NBIS/Bozorth3 matcher is designed for 20–40.
+- To let the genuine finger match at all, the driver sets the Bozorth3 match
+  threshold to 4 (upstream libfprint's default is 40).
+- A scan is compared against every enrollment sample (8), and any single
+  score at or above the threshold is accepted.
+
+Until this is resolved, treat fingerprint unlock on this sensor as a
+convenience that another person's finger may be able to pass.
 
 ---
 
