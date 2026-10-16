@@ -26,7 +26,7 @@ import sys
 import gi
 
 gi.require_version("FPrint", "2.0")
-from gi.repository import FPrint  # noqa: E402
+from gi.repository import FPrint, GLib  # noqa: E402
 
 
 def give_to_invoking_user(*paths):
@@ -53,11 +53,21 @@ def main():
         sys.exit("elan0c7f sensor not found (is fprintd still running?)")
     dev = devices[0]
     dev.open_sync()
+    retries = 0
     try:
         for n in range(start, start + count):
-            print(f"[{label} {n - start + 1}/{count}] place finger...",
-                  end="", flush=True)
-            img = dev.capture_sync(True)
+            while True:
+                print(f"[{label} {n - start + 1}/{count}] place finger...",
+                      end="", flush=True)
+                try:
+                    img = dev.capture_sync(True)
+                    break
+                except GLib.Error as e:
+                    # e.g. no minutiae found: a failed scan, not a fatal error
+                    if e.domain != GLib.quark_to_string(FPrint.DeviceRetry.quark()):
+                        raise
+                    retries += 1
+                    print(f" failed ({e.message}), try again")
             w, h = img.get_width(), img.get_height()
             path = os.path.join(out_dir, f"{n:03d}.pgm")
             with open(path, "wb") as f:
@@ -67,6 +77,13 @@ def main():
             print(f" saved {path}")
     finally:
         dev.close_sync()
+        if retries:
+            print(f"{retries} failed scan(s) for {label}")
+            # Failed scans are part of the picture too (failure to acquire).
+            log = os.path.join(out_dir, "failed-scans.txt")
+            with open(log, "a") as f:
+                f.write(f"{retries}\n")
+            give_to_invoking_user(log)
 
 
 if __name__ == "__main__":
