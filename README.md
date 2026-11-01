@@ -224,8 +224,9 @@ touches match against those too. Learned touches unlock but are never learned
 from, so the print cannot drift. They are stored per enrollment in
 `/var/lib/fprint/elan0c7f-learned/` (root only), and re-enrolling starts afresh.
 Replaying 63 real scans in order, learning raised acceptance from 38 to 56; the
-highest wrong-finger score went from 4 to 5. Deleting a fingerprint does not
-delete its learned file: remove that directory as well.
+highest wrong-finger score went from 4 to 5. Deleting a fingerprint deletes its
+learned touches too: on every open and close the driver removes learned files
+that no stored print owns.
 
 ### Results
 

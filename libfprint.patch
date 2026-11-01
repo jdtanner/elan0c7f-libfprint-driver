@@ -218,10 +218,10 @@ index 00000000..13219017
 +};
 diff --git a/libfprint/drivers/elan0c7f-learn.c b/libfprint/drivers/elan0c7f-learn.c
 new file mode 100644
-index 00000000..467d7cb8
+index 00000000..3d102487
 --- /dev/null
 +++ b/libfprint/drivers/elan0c7f-learn.c
-@@ -0,0 +1,157 @@
+@@ -0,0 +1,200 @@
 +/*
 + * Learned samples for the ELAN 04f3:0c7f sensor
 + *
@@ -258,6 +258,7 @@ index 00000000..467d7cb8
 + */
 +
 +#include <errno.h>
++#include <string.h>
 +#include <glib/gstdio.h>
 +
 +#include "elan0c7f-learn.h"
@@ -292,26 +293,30 @@ index 00000000..467d7cb8
 +}
 +
 +GVariant *
-+elan0c7f_learn_load (const char *dir, const char *key)
++elan0c7f_learn_load (const char *dir, const char *key, GError **error)
 +{
 +  g_autofree gchar *path = learn_path (dir, key);
++  g_autofree gchar *contents = NULL;
 +
-+  g_autoptr(GMappedFile) file = NULL;
 +  g_autoptr(GBytes) bytes = NULL;
 +  g_autoptr(GVariant) data = NULL;
-+  g_autoptr(GError) error = NULL;
++  g_autoptr(GError) read_error = NULL;
 +  guint32 version;
++  gsize len;
 +  GVariant *samples;
 +
-+  file = g_mapped_file_new (path, FALSE, &error);
-+  if (!file)
++  /* Read, not mapped: fprintd's SELinux policy allows reading its state
++   * directory but denies mmap there (g_mapped_file_new fails with EACCES). */
++  if (!g_file_get_contents (path, &contents, &len, &read_error))
 +    {
-+      if (!g_error_matches (error, G_FILE_ERROR, G_FILE_ERROR_NOENT))
-+        g_warning ("Could not read learned samples %s: %s", path, error->message);
++      if (g_error_matches (read_error, G_FILE_ERROR, G_FILE_ERROR_NOENT))
++        return NULL;
++      g_propagate_prefixed_error (error, g_steal_pointer (&read_error),
++                                  "Could not read learned samples: ");
 +      return NULL;
 +    }
 +
-+  bytes = g_mapped_file_get_bytes (file);
++  bytes = g_bytes_new_take (g_steal_pointer (&contents), len);
 +  data = g_variant_ref_sink (g_variant_new_from_bytes (G_VARIANT_TYPE (LEARN_FORMAT),
 +                                                       bytes, FALSE));
 +  /* A truncated or foreign file would otherwise read as default values. */
@@ -379,12 +384,50 @@ index 00000000..467d7cb8
 +                                   g_variant_get_size (normal),
 +                                   G_FILE_SET_CONTENTS_CONSISTENT, 0600, error);
 +}
++
++/* A SHA-256 in lower-case hex, as elan0c7f_learn_key() names files. */
++static gboolean
++is_key (const char *name)
++{
++  if (strlen (name) != 64)
++    return FALSE;
++  for (const char *c = name; *c; c++)
++    if (!g_ascii_isdigit (*c) && !(*c >= 'a' && *c <= 'f'))
++      return FALSE;
++  return TRUE;
++}
++
++guint
++elan0c7f_learn_sweep (const char *dir, GHashTable *keep)
++{
++  g_autoptr(GDir) d = g_dir_open (dir, 0, NULL);
++  const char *name;
++  guint removed = 0;
++
++  if (!d)
++    return 0;
++
++  while ((name = g_dir_read_name (d)))
++    {
++      g_autofree gchar *path = NULL;
++
++      if (!is_key (name) || g_hash_table_contains (keep, name))
++        continue;
++
++      path = g_build_filename (dir, name, NULL);
++      if (g_unlink (path) == 0)
++        removed++;
++      else
++        g_warning ("Could not remove learned samples %s: %s", path, g_strerror (errno));
++    }
++  return removed;
++}
 diff --git a/libfprint/drivers/elan0c7f-learn.h b/libfprint/drivers/elan0c7f-learn.h
 new file mode 100644
-index 00000000..d3264ad0
+index 00000000..7d49fd0d
 --- /dev/null
 +++ b/libfprint/drivers/elan0c7f-learn.h
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,73 @@
 +/*
 + * Learned samples for the ELAN 04f3:0c7f sensor
 + *
@@ -425,12 +468,16 @@ index 00000000..d3264ad0
 + * gives new samples and so a new key, which starts learning afresh. */
 +gchar *elan0c7f_learn_key (GVariant *enrolled_samples);
 +
-+/* The samples learned for @key, an ELAN0C7F_SAMPLES_TYPE array, or NULL if
-+ * there are none or the file is unreadable, of another format version, or
-+ * not in the expected shape.  Never an error: a bad file means "nothing
-+ * learned yet", and the next save replaces it. */
++/* The samples learned for @key, an ELAN0C7F_SAMPLES_TYPE array, or NULL.
++ *
++ * A missing file, one of another format version, or one not in the
++ * expected shape returns NULL WITHOUT an error: that means "nothing learned
++ * yet", and the next save replaces it.  A file that exists but cannot be
++ * read returns NULL WITH @error set, and the caller must then not save:
++ * that would replace samples it could not see. */
 +GVariant *elan0c7f_learn_load (const char *dir,
-+                               const char *key);
++                               const char *key,
++                               GError    **error);
 +
 +/* @learned (may be NULL) with @sample appended, keeping at most @cap
 + * samples by dropping the oldest.  Returns a new (non-floating) reference. */
@@ -445,6 +492,13 @@ index 00000000..d3264ad0
 +                              const char *key,
 +                              GVariant   *learned,
 +                              GError    **error);
++
++/* Delete every learned file in @dir whose key is not in @keep (a set of
++ * key strings), and return how many were deleted.  Only files named like a
++ * key are touched.  Used when a print has been deleted: fprintd does not
++ * tell the driver, and the learned samples are fingerprint data too. */
++guint elan0c7f_learn_sweep (const char *dir,
++                            GHashTable *keep);
 +
 +G_END_DECLS
 diff --git a/libfprint/drivers/elan0c7f-sift.cpp b/libfprint/drivers/elan0c7f-sift.cpp
@@ -663,10 +717,10 @@ index 00000000..b26cf7e0
 +G_END_DECLS
 diff --git a/libfprint/drivers/elan0c7f.c b/libfprint/drivers/elan0c7f.c
 new file mode 100644
-index 00000000..57231e1a
+index 00000000..864557d3
 --- /dev/null
 +++ b/libfprint/drivers/elan0c7f.c
-@@ -0,0 +1,1215 @@
+@@ -0,0 +1,1332 @@
 +/*
 + * ELAN 04f3:0c7f Fingerprint Sensor driver for libfprint
 + *
@@ -1429,11 +1483,16 @@ index 00000000..57231e1a
 +
 +/* -- FpImageDevice vfuncs -- */
 +
++static void sweep_learned (void);
++
 +static void
 +dev_open (FpImageDevice *dev)
 +{
 +  GError *error = NULL;
 +  GUsbDevice *usb_dev = fpi_device_get_usb_device (FP_DEVICE (dev));
++
++  /* Also here, in case fprintd stopped before a close. */
++  sweep_learned ();
 +
 +  if (!g_usb_device_claim_interface (usb_dev, 0, 0, &error))
 +    {
@@ -1452,6 +1511,9 @@ index 00000000..57231e1a
 +
 +  g_usb_device_release_interface (usb_dev, 0, 0, &error);
 +  g_clear_error (&error);
++
++  /* fprintd closes the device as soon as a delete finishes. */
++  sweep_learned ();
 +  fpi_image_device_close_complete (dev, NULL);
 +}
 +
@@ -1625,6 +1687,110 @@ index 00000000..57231e1a
 +                g_variant_new ("(u@a(aday))", PRINT_FORMAT_VERSION,
 +                               g_variant_builder_end (samples)),
 +                NULL);
++}
++
++/* -- Removing learned samples of deleted prints --
++ *
++ * fprintd does not tell a driver when a print is deleted, so the learned
++ * samples of a deleted print would stay on disk: unusable (nothing else has
++ * that key) but still fingerprint data.  On every open and close the driver
++ * lists the prints fprintd has stored, and removes learned files that no
++ * longer belong to one.  fprintd closes the device as soon as a delete
++ * finishes, so they go within moments.
++ *
++ * This reads fprintd's own storage, laid out as
++ * <state dir>/<user>/<driver>/<device>/<finger>, with the learned directory
++ * beside the user directories.  If any print cannot be read, nothing is
++ * removed.  Finding no prints at all removes every learned file: that is
++ * the common case of deleting one's only fingerprint.  Should fprintd ever
++ * change its layout, the cost is that learning stops working (each open
++ * clears it, and says so in the log), not that anything is kept or lost
++ * that should not be. */
++
++/* Add the learned-file key of every elan0c7f print under @root to @keys.
++ * Returns the number of prints read, or -1 if any could not be. */
++static gint
++collect_print_keys (const char *root, GHashTable *keys)
++{
++  g_autoptr(GDir) users = g_dir_open (root, 0, NULL);
++  const char *user;
++  gint found = 0;
++
++  if (!users)
++    return -1;
++
++  while ((user = g_dir_read_name (users)))
++    {
++      g_autofree gchar *drv = g_build_filename (root, user, FP_COMPONENT, NULL);
++      g_autoptr(GDir) devices = NULL;
++      const char *device;
++
++      if (!g_file_test (drv, G_FILE_TEST_IS_DIR))
++        continue;
++      devices = g_dir_open (drv, 0, NULL);
++      if (!devices)
++        return -1;
++
++      while ((device = g_dir_read_name (devices)))
++        {
++          g_autofree gchar *dev_dir = g_build_filename (drv, device, NULL);
++          g_autoptr(GDir) fingers = g_dir_open (dev_dir, 0, NULL);
++          const char *finger;
++
++          if (!fingers)
++            return -1;
++
++          while ((finger = g_dir_read_name (fingers)))
++            {
++              g_autofree gchar *path = g_build_filename (dev_dir, finger, NULL);
++              g_autofree gchar *contents = NULL;
++              g_autoptr(FpPrint) print = NULL;
++              g_autoptr(GVariant) samples = NULL;
++              g_autoptr(GError) error = NULL;
++              gsize len;
++
++              if (!g_file_get_contents (path, &contents, &len, &error))
++                return -1;
++              print = fp_print_deserialize ((const guchar *) contents, len, &error);
++              if (!print)
++                return -1;
++
++              found++;
++              samples = print_samples (print);
++              if (samples)
++                g_hash_table_add (keys, elan0c7f_learn_key (samples));
++            }
++        }
++    }
++  return found;
++}
++
++static void
++sweep_learned (void)
++{
++  const char *dir = elan0c7f_learn_dir ();
++  g_autofree gchar *root = NULL;
++
++  g_autoptr(GHashTable) keys = NULL;
++  gint prints;
++  guint removed;
++
++  if (!dir || !g_file_test (dir, G_FILE_TEST_IS_DIR))
++    return;
++
++  root = g_path_get_dirname (dir);
++  keys = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
++  prints = collect_print_keys (root, keys);
++  if (prints < 0)
++    {
++      fp_dbg ("not removing learned samples: a stored print could not be read");
++      return;
++    }
++
++  removed = elan0c7f_learn_sweep (dir, keys);
++  if (removed)
++    fp_info ("Removed learned samples of %u deleted fingerprint(s), %d stored print(s) remain",
++             removed, prints);
 +}
 +
 +/* Debugging aid, off unless ELAN0C7F_DUMP_DIR is set: save each scan that
@@ -1807,7 +1973,11 @@ index 00000000..57231e1a
 +  if (dir)
 +    {
 +      g_autofree gchar *key = elan0c7f_learn_key (templates);
-+      g_autoptr(GVariant) learned = elan0c7f_learn_load (dir, key);
++      g_autoptr(GError) load_error = NULL;
++      g_autoptr(GVariant) learned = elan0c7f_learn_load (dir, key, &load_error);
++
++      if (load_error)
++        g_warning ("%s; not learning from this scan", load_error->message);
 +
 +      if (learned && result != FPI_MATCH_SUCCESS &&
 +          best_score (&probe, learned, "learned", MATCH_THRESHOLD) >= MATCH_THRESHOLD)
@@ -1816,8 +1986,9 @@ index 00000000..57231e1a
 +      /* Learn only from a confident match against the ENROLLED samples,
 +       * never from one against a learned sample: otherwise a touch a little
 +       * off the finger could teach it one a little further off, and the
-+       * print would drift.  A wrong finger has never scored above 6. */
-+      if (best >= LEARN_THRESHOLD)
++       * print would drift.  A wrong finger has never scored above 6.
++       * Never after a failed read, which would overwrite unseen samples. */
++      if (best >= LEARN_THRESHOLD && !load_error)
 +        {
 +          g_autoptr(GVariant) updated = elan0c7f_learn_add (learned, probe_v, LEARN_MAX_SAMPLES);
 +          g_autoptr(GError) save_error = NULL;

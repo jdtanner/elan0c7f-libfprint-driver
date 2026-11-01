@@ -12,6 +12,7 @@
  */
 
 #include <sys/stat.h>
+#include <unistd.h>
 #include <glib.h>
 #include <glib/gstdio.h>
 
@@ -55,6 +56,17 @@ samples_of (int from, int to)
       out = next;
     }
   return out;
+}
+
+/* Load, asserting the load itself did not fail. */
+static GVariant *
+load_ok (const char *dir, const char *key)
+{
+  g_autoptr(GError) error = NULL;
+  GVariant *v = elan0c7f_learn_load (dir, key, &error);
+
+  g_assert_no_error (error);
+  return v;
 }
 
 static gchar *
@@ -148,12 +160,12 @@ test_round_trip_and_permissions (void)
   g_autofree gchar *path = g_build_filename (dir, "k", NULL);
   GStatBuf st;
 
-  g_assert_null (elan0c7f_learn_load (dir, "k"));   /* missing: nothing yet */
+  g_assert_null (load_ok (dir, "k"));   /* missing: nothing yet */
 
   g_assert_true (elan0c7f_learn_save (dir, "k", learned, &error));
   g_assert_no_error (error);
 
-  back = elan0c7f_learn_load (dir, "k");
+  back = load_ok (dir, "k");
   g_assert_nonnull (back);
   g_assert_true (g_variant_equal (back, learned));
 
@@ -191,27 +203,117 @@ test_bad_files_read_as_nothing (void)
   /* Truncated: the version survives but the samples do not. */
   write_raw (dir, "truncated", contents, len - 5);
   g_test_expect_message (NULL, G_LOG_LEVEL_WARNING, "*malformed*");
-  g_assert_null (elan0c7f_learn_load (dir, "truncated"));
+  g_assert_null (load_ok (dir, "truncated"));
   g_test_assert_expected_messages ();
 
   /* Another format version. */
   other = g_variant_ref_sink (g_variant_new ("(u@a(aday))", 2, learned));
   normal = g_variant_get_normal_form (other);
   write_raw (dir, "v2", g_variant_get_data (normal), g_variant_get_size (normal));
-  g_assert_null (elan0c7f_learn_load (dir, "v2"));
+  g_assert_null (load_ok (dir, "v2"));
 
   /* Empty, and something else entirely. */
   write_raw (dir, "empty", "", 0);
   g_test_expect_message (NULL, G_LOG_LEVEL_WARNING, "*malformed*");
-  g_assert_null (elan0c7f_learn_load (dir, "empty"));
+  g_assert_null (load_ok (dir, "empty"));
   g_test_assert_expected_messages ();
 
   write_raw (dir, "garbage", "FP3 not a learned file at all", 29);
   g_test_expect_message (NULL, G_LOG_LEVEL_WARNING, "*malformed*");
-  g_assert_null (elan0c7f_learn_load (dir, "garbage"));
+  g_assert_null (load_ok (dir, "garbage"));
   g_test_assert_expected_messages ();
 
   rm_rf (dir);
+}
+
+static void
+test_unreadable_file_is_an_error (void)
+{
+  g_autofree gchar *dir = tmpdir ();
+  g_autoptr(GVariant) learned = samples_of (1, 3);
+  g_autoptr(GError) error = NULL;
+  g_autofree gchar *path = g_build_filename (dir, "k", NULL);
+
+  if (geteuid () == 0)
+    {
+      g_test_skip ("root reads files whatever their mode");
+      rm_rf (dir);
+      return;
+    }
+
+  /* Exists but cannot be read: NOT "nothing learned", or the caller would
+   * save over samples it could not see. */
+  g_assert_true (elan0c7f_learn_save (dir, "k", learned, &error));
+  g_assert_cmpint (g_chmod (path, 0), ==, 0);
+  g_assert_null (elan0c7f_learn_load (dir, "k", &error));
+  g_assert_error (error, G_FILE_ERROR, G_FILE_ERROR_ACCES);
+  g_assert_true (g_str_has_prefix (error->message, "Could not read learned samples"));
+
+  g_chmod (path, 0600);
+  rm_rf (dir);
+}
+
+#define KEY_A "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+#define KEY_B "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+#define KEY_C "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+
+static gboolean
+exists (const char *dir, const char *name)
+{
+  g_autofree gchar *p = g_build_filename (dir, name, NULL);
+
+  return g_file_test (p, G_FILE_TEST_EXISTS);
+}
+
+static void
+test_sweep_removes_only_orphaned_keys (void)
+{
+  g_autofree gchar *dir = tmpdir ();
+  g_autoptr(GHashTable) keep = g_hash_table_new (g_str_hash, g_str_equal);
+
+  write_raw (dir, KEY_A, "x", 1);
+  write_raw (dir, KEY_B, "x", 1);
+  write_raw (dir, KEY_C, "x", 1);
+  /* Not named like a key: never the sweep's business. */
+  write_raw (dir, "README", "x", 1);
+  write_raw (dir, "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789", "x", 1);
+  write_raw (dir, KEY_A ".tmp", "x", 1);
+
+  g_hash_table_add (keep, KEY_B);
+  g_assert_cmpuint (elan0c7f_learn_sweep (dir, keep), ==, 2);
+
+  g_assert_false (exists (dir, KEY_A));
+  g_assert_true (exists (dir, KEY_B));
+  g_assert_false (exists (dir, KEY_C));
+  g_assert_true (exists (dir, "README"));
+  g_assert_true (exists (dir, "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789"));
+  g_assert_true (exists (dir, KEY_A ".tmp"));
+
+  rm_rf (dir);
+}
+
+static void
+test_sweep_with_nothing_kept_removes_every_key (void)
+{
+  g_autofree gchar *dir = tmpdir ();
+  g_autoptr(GHashTable) keep = g_hash_table_new (g_str_hash, g_str_equal);
+
+  /* Deleting one's only fingerprint. */
+  write_raw (dir, KEY_A, "x", 1);
+  write_raw (dir, KEY_B, "x", 1);
+  g_assert_cmpuint (elan0c7f_learn_sweep (dir, keep), ==, 2);
+  g_assert_false (exists (dir, KEY_A));
+  g_assert_false (exists (dir, KEY_B));
+
+  rm_rf (dir);
+}
+
+static void
+test_sweep_of_missing_dir_is_harmless (void)
+{
+  g_autoptr(GHashTable) keep = g_hash_table_new (g_str_hash, g_str_equal);
+
+  g_assert_cmpuint (elan0c7f_learn_sweep ("/nonexistent/learn-test", keep), ==, 0);
 }
 
 int
@@ -223,5 +325,9 @@ main (int argc, char **argv)
   g_test_add_func ("/learn/add-caps-dropping-oldest", test_add_caps_dropping_oldest);
   g_test_add_func ("/learn/round-trip-and-permissions", test_round_trip_and_permissions);
   g_test_add_func ("/learn/bad-files-read-as-nothing", test_bad_files_read_as_nothing);
+  g_test_add_func ("/learn/unreadable-file-is-an-error", test_unreadable_file_is_an_error);
+  g_test_add_func ("/learn/sweep-removes-only-orphaned-keys", test_sweep_removes_only_orphaned_keys);
+  g_test_add_func ("/learn/sweep-with-nothing-kept-removes-every-key", test_sweep_with_nothing_kept_removes_every_key);
+  g_test_add_func ("/learn/sweep-of-missing-dir-is-harmless", test_sweep_of_missing_dir_is_harmless);
   return g_test_run ();
 }

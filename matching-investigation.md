@@ -285,10 +285,29 @@ margin narrowed by one point at the chosen setting, which is the thing to keep
 watching. Installed as `libfprint-1.94.100-1.8.elan0c7f`; first live use learned
 a touch scoring 17 and wrote the file with the expected mode and SELinux label.
 
-**Known gap:** deleting a fingerprint through fprintd does not delete its learned
-file, since the driver is not told about deletions. The file is unreachable once
-its print is gone (nothing else has that hash), but it is still fingerprint data:
-`sudo rm -r /var/lib/fprint/elan0c7f-learned` after deleting prints.
+**Learned samples were never loaded in 1.8 and 1.9.** The store read its file with
+`g_mapped_file_new`, and fprintd's SELinux policy allows `fprintd_t` to read
+`fprintd_var_lib_t` files but denies `map` (AVC in the audit log; unconfined unit
+tests cannot see it). Every load failed, and the save after it replaced the file
+with the one new touch, so learning never held more than one sample. Fixed in
+`libfprint-1.94.100-1.10.elan0c7f`: the file is read with `g_file_get_contents`,
+and a file that exists but cannot be read is now an error after which nothing is
+saved, so a read failure can no longer overwrite samples it could not see. Only a
+missing, malformed or other-version file counts as "nothing learned yet".
+
+**Deleted prints (1.9):** fprintd does not tell the driver when a print is
+deleted, so at first a deleted print's learned file stayed behind: unusable, but
+still fingerprint data. Since `libfprint-1.94.100-1.9.elan0c7f`, on every open and
+close the driver reads the prints fprintd has stored
+(`<state dir>/<user>/elan0c7f/<device>/<finger>`, beside the learned directory)
+and removes learned files that no print owns. fprintd closes the device as soon
+as a delete finishes, so they go within moments. If any print cannot be read,
+nothing is removed; finding no prints removes every learned file, since that is
+the case of deleting one's only fingerprint. A future fprintd with a different
+layout would therefore stop learning working (each open clears it, and logs
+"Removed learned samples ...") rather than keep or lose anything it should not.
+Checked live by planting a learned file with an unowned name: the next open and
+close removed it and kept the real one.
 
 ---
 
