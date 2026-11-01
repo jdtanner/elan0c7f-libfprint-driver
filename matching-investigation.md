@@ -309,13 +309,37 @@ layout would therefore stop learning working (each open clears it, and logs
 Checked live by planting a learned file with an unowned name: the next open and
 close removed it and kept the real one.
 
+### First evening on 1.10 (1 Nov, 21:54 to 22:00)
+
+| | |
+|---|---|
+| Touches | 14 |
+| Unlocked | 8 |
+| Learned | 5 (6 learned samples in all, one carried over from 1.9) |
+| Learned file | 71 KB, 0600, loaded on every match, no read errors or SELinux denials |
+
+Unlocking touches scored 10 to 27 against the enrollment. Most misses scored 0 to
+2 against everything, enrolled and learned alike: touches landing on a part of the
+finger nothing covers yet, which learning can only reach gradually because it
+learns only from touches that also overlap the enrollment at 15 or more. Too few
+touches, all on one evening, to say whether learning is improving the rate; that
+needs the days of normal use below.
+
 ---
 
 ## 9. Open items
 
-- **More days of data:** two evenings from one person so far. Keep the debug
-  drop-in on for a week or two and re-run `tools/learn-sim.py` on the saved scans,
-  watching the highest wrong-finger score as learned samples accumulate.
+- **More days of data (check around mid November 2026):** two evenings from one
+  person so far. The debug drop-in is on
+  (`/etc/systemd/system/fprintd.service.d/elan0c7f-debug.conf`), so every score is
+  in the journal and every scan in `/var/lib/fprint/elan0c7f-dumps`. Then:
+  - unlock rate per day from the journal, against the 8 of 14 on 1 Nov;
+  - how many samples have been learned (up to 24);
+  - the highest wrong-finger score against the enrollment plus the learned
+    samples. `tools/learn-sim.py` scores against the enrollment only, so this
+    needs the learned file loaded as extra samples, a small addition to the tool;
+  - copy the scans to the private captures directory, then switch recording off
+    (delete the drop-in and `elan0c7f-dumps`).
 - **Other units:** the icon map was built on one laptop. Other units of the same
   model carry the same icon, but its exact position may differ slightly; this is
   untested.
