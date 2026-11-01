@@ -3,8 +3,9 @@
 **Date:** 2026-10-16
 **System:** Fedora 45, libfprint 1.94.100 (Fedora package rebuilt with this driver), fprintd 1.94.5
 **Result:** the driver now matches with SIFT keypoints after removing the
-power-key icon from each scan. In the latest live test the enrolled finger
-matched 8 times in 10 and no wrong finger was accepted (0 of 10).
+power-key icon from each scan, and (since 2026-11-01, section 8) learns from
+confident matches. In the latest live test the enrolled finger matched 8 times
+in 10 and no wrong finger was accepted (0 of 10).
 
 This document records what was changed, what was measured, and what is still open.
 
@@ -203,11 +204,99 @@ Fingerprint login was re-enabled on the test machine after the last result.
 
 ---
 
-## 8. Open items
+## 8. Second session (2026-11-01): the enrollment, then learning
 
-- **Second session:** all data is from one person on one evening. Results should be
-  confirmed on another day (skin dryness and temperature vary), including more
-  wrong-finger attempts.
+Two weeks of daily use: fingerprint unlock "doesn't work a lot, but never seems to
+false positive". The journal held no scores (debug logging had been switched off
+after 16 Oct), so the driver's debug log and scan saving were switched on for
+fprintd with a systemd drop-in:
+
+```
+# /etc/systemd/system/fprintd.service.d/elan0c7f-debug.conf
+[Service]
+Environment=G_MESSAGES_DEBUG=libfprint-elan0c7f
+Environment=ELAN0C7F_DUMP_DIR=/var/lib/fprint/elan0c7f-dumps
+```
+
+Two journal messages that look like faults and are not:
+
+- "Driver reported a match providing a scanned print that is not matching any in
+  the gallery" is printed on every **successful** match: libfprint compares the
+  scanned probe against the gallery with `fp_print_equal`, exempts only NBIS
+  prints, and on failure drops the probe copy while keeping the match. It counts
+  successes (20 between 17 Oct and 1 Nov).
+- "Cannot run while suspended" is the lock screen's verify being cut off as the
+  laptop goes to sleep.
+
+### The enrollment was the fault
+
+The first 10 live touches unlocked once. None was a near miss: the nine failures
+scored 0 to 5, the range a wrong finger scores. Replaying them (the replay
+reproduced every live score) showed why:
+
+- The print in use, enrolled on 24 Oct, had samples that barely matched each other
+  (best score per sample 0 to 14, eight of the twelve at 4 or below): the shifted
+  placement pattern of section 6.
+- The same touches matched **each other** strongly (seven of ten scored 8 to 32
+  together) and matched the 16 Oct scans of the same finger (up to 30). Placement
+  was consistent; the enrollment did not cover it.
+
+Re-enrolling with natural placement gave samples scoring 12 to 52 against each
+other. Replayed against it, 7 of the same 10 touches would have unlocked, and the
+next 10 fresh touches unlocked 8 times, both misses followed by a success on the
+next touch.
+
+**Natural wobble is wanted in an enrollment; deliberate shifting is not.** Twelve
+touches placed the way you unlock vary by themselves, and that variation is what
+the samples are for.
+
+### Learning
+
+Twelve scans of a 2.6 mm wide patch can only cover part of a finger, and the
+Windows engine adapter's settings (`MaxEnrollNum` beside a separate
+`MaxTemplateNum`) hint that it keeps adding touches after enrollment. fprintd
+saves a print only when enrolling, and libfprint's `FP_DEVICE_FEATURE_UPDATE_PRINT`
+only adds enrollment stages to an existing print, so learning lives in the driver
+(`elan0c7f-learn.c`):
+
+- A touch scoring at least **15** against an **enrolled** sample is kept. A match
+  against a learned sample unlocks but is never learned from, so the print cannot
+  drift one slightly-off touch at a time.
+- At most **24** learned samples, newest kept, so changing skin replaces itself.
+- One file per enrollment in `/var/lib/fprint/elan0c7f-learned/`, named by the
+  SHA-256 of the enrolled samples, mode 0600 in a 0700 directory. Re-enrolling
+  gives a new name and starts afresh. `ELAN0C7F_LEARN_DIR` overrides the
+  directory; set to an empty string it turns learning off.
+
+Chosen by replaying 63 real scans of the enrolled finger in the order they were
+made (the 1 Nov touches, then the 16 Oct scans as a stand-in for another day),
+against 40 scans of four other fingers (`tools/learn-sim.py`):
+
+| Setting | Unlocked | Highest wrong-finger score (8 unlocks) |
+|---|---|---|
+| No learning | 38 of 63 | 4 |
+| Learn at 20 or more, keep 24 | 45 of 63 | 4 |
+| **Learn at 15 or more, keep 24** | **56 of 63** | 5 |
+| Learn at 15 or more, keep 12 | 55 of 63 | 5 |
+| Learn at 12 or more, keep 24 | 56 of 63 | 5 |
+
+Most of the gain is on the 16 Oct scans, the different-day case. The wrong-finger
+margin narrowed by one point at the chosen setting, which is the thing to keep
+watching. Installed as `libfprint-1.94.100-1.8.elan0c7f`; first live use learned
+a touch scoring 17 and wrote the file with the expected mode and SELinux label.
+
+**Known gap:** deleting a fingerprint through fprintd does not delete its learned
+file, since the driver is not told about deletions. The file is unreachable once
+its print is gone (nothing else has that hash), but it is still fingerprint data:
+`sudo rm -r /var/lib/fprint/elan0c7f-learned` after deleting prints.
+
+---
+
+## 9. Open items
+
+- **More days of data:** two evenings from one person so far. Keep the debug
+  drop-in on for a week or two and re-run `tools/learn-sim.py` on the saved scans,
+  watching the highest wrong-finger score as learned samples accumulate.
 - **Other units:** the icon map was built on one laptop. Other units of the same
   model carry the same icon, but its exact position may differ slightly; this is
   untested.
@@ -229,5 +318,7 @@ Fingerprint login was re-enabled on the test machine after the last result.
 | `tools/sift-score.py` | The SIFT/RANSAC prototype |
 | `tools/sift-matrix.c` | Score with the driver's own C++ matcher |
 | `tools/analyse.py` | Genuine vs impostor distributions and simulated FRR/FAR |
+| `tools/learn-sim.py` | Replay scans in order with and without learning; the driver's matcher in Python |
+| `tools/learn-test.c` | Unit tests for the learned-sample store (`elan0c7f-learn.c`) |
 
 Scan data is not included in this repository: fingerprint images are biometric data.

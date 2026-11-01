@@ -178,10 +178,16 @@ Both bugs reported upstream: https://gitlab.gnome.org/GNOME/gnome-control-center
 
 ## Matching
 
-**Status: promising, not yet confirmed.** In the latest live test the enrolled
-finger matched 8 times in 10 and no wrong finger was accepted (0 of 10). All
-data so far is from one person on one evening; a second session on another day
-is still to come before recommending it for login.
+**Status: in daily use, still being measured.** After re-enrolling with natural
+placement, 8 of 10 fresh touches unlocked first time, and no wrong finger has
+been accepted in any live test. Since 2026-11-01 the driver also learns from
+confident matches (below). All data is from one person on two evenings; see
+`matching-investigation.md` section 8.
+
+**Enroll the way you unlock.** Place your finger naturally for each of the 12
+touches and lift it fully between them. The small natural variation is what the
+samples are for; deliberately shifting the finger spreads them over patches a
+normal touch never lands on, and was the cause of most rejections seen so far.
 
 ### Why not NBIS/Bozorth3
 
@@ -208,6 +214,18 @@ Before extracting features the driver divides each scan by a fixed map of the
 icon (`elan0c7f-gain.h`: the blurred average of 40 scans of four fingers that
 were never enrolled). The map comes from one unit; other units of the same
 model carry the same icon, but its exact position may differ slightly.
+
+### Learning
+
+The sensor sees about 2.6 mm of finger, so 12 enrollment scans cover only part of
+it. A touch scoring at least 15 against an enrolled sample (8 unlocks; a wrong
+finger has never scored above 6) is kept, up to 24, newest kept, and later
+touches match against those too. Learned touches unlock but are never learned
+from, so the print cannot drift. They are stored per enrollment in
+`/var/lib/fprint/elan0c7f-learned/` (root only), and re-enrolling starts afresh.
+Replaying 63 real scans in order, learning raised acceptance from 38 to 56; the
+highest wrong-finger score went from 4 to 5. Deleting a fingerprint does not
+delete its learned file: remove that directory as well.
 
 ### Results
 
@@ -244,6 +262,9 @@ On libfprint 1.94.100 / Fedora 45:
   `sift-score.py` exactly on the measured captures)
 - `analyse.py` — genuine vs impostor score distributions and simulated
   FRR/FAR for "K of N enrollment samples score ≥ T"
+- `learn-sim.py` — replay scans in order with and without learning, against
+  an enrolled print and other fingers
+- `learn-test.c` — unit tests for the learned-sample store
 
 On libfprint 1.94.10 / Fedora 43 (with IDENTIFY masked):
 - `fprintd-enroll` — enrollment succeeds end-to-end
