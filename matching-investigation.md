@@ -325,21 +325,49 @@ learns only from touches that also overlap the enrollment at 15 or more. Too few
 touches, all on one evening, to say whether learning is improving the rate; that
 needs the days of normal use below.
 
+### Everyday use, 2 to 10 Nov
+
+Nine days of normal unlocking on 1.10, same enrollment, scores from the journal:
+
+| | |
+|---|---|
+| Touches | 22 (0 to 10 a day, usually 1 or 2) |
+| Unlocked | 13 of 22 (59%, against 8 of 14 on 1 Nov) |
+| Attempts to unlock | 13, all succeeded: 8 on the first touch, 4 on the second, 1 on the fifth |
+| Learned | 3 more touches (2, 7 and 8 Nov), 9 learned samples in all |
+| Unlocks owed to a learned sample | none: all 13 scored 8 to 27 against the enrollment |
+| Best learned score on a miss | 5 (7 Nov); misses otherwise scored 0 to 4 against learned samples |
+
+**Wrong fingers against enrollment plus learned samples:** the 40 scans of four
+other fingers score at most **4** (enrolled samples 0 to 4, each of the nine live
+learned samples 3), unchanged from before learning, against a threshold of 8.
+Measured with `tools/learn-sim.py --learned`, which loads a copy of the live learned
+file; it reproduced the driver's logged scores against the learned samples exactly
+on the 7 and 10 Nov misses.
+
+So far learning is safe but has not yet helped: the samples it adds come from
+touches the enrollment already covers well (learning needs 15 or more against an
+enrolled sample), and the misses land elsewhere. With about two touches a day it
+gains roughly one sample every three days, so the rate needs longer to judge.
+Scans copied to the private captures directory (`live-sessions/2026-11-02-to-10`);
+recording left on.
+
 ---
 
 ## 9. Open items
 
-- **More days of data (check around mid November 2026):** two evenings from one
-  person so far. The debug drop-in is on
+- **More days of data (check again in early December 2026):** the mid-November
+  check (above) found learning safe but not yet helping, on too few touches to say
+  more. The debug drop-in stays on
   (`/etc/systemd/system/fprintd.service.d/elan0c7f-debug.conf`), so every score is
   in the journal and every scan in `/var/lib/fprint/elan0c7f-dumps`. Then:
-  - unlock rate per day from the journal, against the 8 of 14 on 1 Nov;
-  - how many samples have been learned (up to 24);
-  - the highest wrong-finger score against the enrollment plus the learned
-    samples. `tools/learn-sim.py` scores against the enrollment only, so this
-    needs the learned file loaded as extra samples, a small addition to the tool;
-  - copy the scans to the private captures directory, then switch recording off
-    (delete the drop-in and `elan0c7f-dumps`).
+  - unlock rate per day from the journal, and how many unlocks a learned sample
+    gave (none up to 10 Nov);
+  - how many samples have been learned (9 of 24 on 10 Nov);
+  - the highest wrong-finger score with `tools/learn-sim.py --learned` on a copy
+    of the live learned file (4 on 10 Nov);
+  - copy the scans made since 10 Nov to the private captures directory, then
+    switch recording off (delete the drop-in and `elan0c7f-dumps`).
 - **Other units:** the icon map was built on one laptop. Other units of the same
   model carry the same icon, but its exact position may differ slightly; this is
   untested.

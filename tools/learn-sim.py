@@ -5,6 +5,7 @@ without learning, to choose or re-check the learning settings offline.
 
   sudo cat /var/lib/fprint/$USER/elan0c7f/0/7 > print.fp
   python3 -I learn-sim.py GAIN_H print.fp PROBE.pgm... --wrong OTHER.pgm...
+  python3 -I learn-sim.py GAIN_H print.fp --learned LEARNED --wrong OTHER.pgm...
 
 GAIN_H is the driver's elan0c7f-gain.h.  PROBES are scans of the enrolled
 finger IN THE ORDER THEY WERE MADE (learning is online, so order matters);
@@ -17,7 +18,13 @@ the 2026-11-01 live session it reproduced every driver score exactly.  The
 learning rule is the driver's: learn a probe that scores at least LEARN
 against an ENROLLED sample (never a learned one), keep the newest CAP.
 
-print.fp is fingerprint data: keep it private and delete it afterwards.
+With --learned, LEARNED is a copy of the driver's live learned-samples file
+(/var/lib/fprint/elan0c7f-learned/<hash>); the OTHERS are then scored
+against the enrollment and against each live learned sample, and no probes
+are needed.
+
+print.fp and LEARNED are fingerprint data: keep them private and delete them
+afterwards.
 
 Requires python3-opencv, python3-numpy and python3-gobject.
 
@@ -89,6 +96,36 @@ def score(a, b):
     return int(np.count_nonzero(inliers))
 
 
+def unpack_samples(data):
+    samples = []
+    for xy, desc in data.get_child_value(1).unpack():
+        samples.append((np.array(xy, np.float64).reshape(-1, 2),
+                        np.frombuffer(bytes(desc), np.uint8)
+                        .reshape(-1, 128).astype(np.float32)))
+    return samples
+
+
+def load_learned(path):
+    raw = open(path, "rb").read()
+    v = GLib.Variant.new_from_bytes(
+        GLib.VariantType.new("(ua(aday))"), GLib.Bytes.new(raw), False)
+    if v.get_child_value(0).get_uint32() != 1:
+        sys.exit(f"{path}: unknown learned-file version")
+    return unpack_samples(v)
+
+
+def report_learned(enrolled, learned, wrong):
+    for name, samples in (("enrolled", enrolled), ("learned", learned)):
+        for i, s in enumerate(samples, 1):
+            print(f"{name} {i:2}/{len(samples)}  wrong-finger max="
+                  f"{max((score(w, s) for w in wrong), default=0)}")
+    worst = max((score(w, s) for w in wrong for s in enrolled + learned),
+                default=0)
+    print(f"overall wrong-finger max={worst} (match threshold "
+          f"{MATCH_THRESHOLD}, {len(enrolled)} enrolled + "
+          f"{len(learned)} learned samples, {len(wrong)} wrong scans)")
+
+
 def load_print(path):
     raw = open(path, "rb").read()
     if raw[:3] != b"FP3":
@@ -101,12 +138,7 @@ def load_print(path):
         data = data.get_variant()
     if data.get_type_string() != "(ua(aday))":
         sys.exit(f"{path} is not an elan0c7f SIFT print")
-    samples = []
-    for xy, desc in data.get_child_value(1).unpack():
-        samples.append((np.array(xy, np.float64).reshape(-1, 2),
-                        np.frombuffer(bytes(desc), np.uint8)
-                        .reshape(-1, 128).astype(np.float32)))
-    return samples
+    return unpack_samples(data)
 
 
 def main():
@@ -116,6 +148,12 @@ def main():
     i = args.index("--wrong")
     gain = load_gain(args[0])
     enrolled = load_print(args[1])
+    if args[2] == "--learned":
+        if i != 4:
+            sys.exit(__doc__)
+        report_learned(enrolled, load_learned(args[3]),
+                       [extract(gain, p) for p in args[i + 1:]])
+        return
     probes = [extract(gain, p) for p in args[2:i]]
     wrong = [extract(gain, p) for p in args[i + 1:]]
 
